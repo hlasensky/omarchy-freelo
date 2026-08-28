@@ -10,17 +10,12 @@ set -uo pipefail
 
 # Optional --project ID filter; empty means "projects only, no tasklists/tasks".
 project_id=""
-# Optional --tasklist ID filter; narrows tasks to just this tasklist.
-# freelo-cli requires --project alongside --tasklist, so this is only valid
-# when project_id is also set.
-tasklist_id=""
 
 # Prints usage/help text.
 usage() {
   cat <<'EOF'
-Usage: omarchy-freelo-refresh [--project ID] [--tasklist ID]
-  --project ID    Also fetch tasklists and tasks for this project ID
-  --tasklist ID   Narrow tasks to this tasklist (requires --project)
+Usage: omarchy-freelo-refresh [--project ID]
+  --project ID   Also fetch tasklists and tasks (per-tasklist) for this project ID
 EOF
 }
 
@@ -32,12 +27,6 @@ while (($#)); do          # loop while there are remaining args
       [[ $# -ge 2 ]] || { echo "missing value for $1" >&2; exit 2; }
       project_id=$2
       shift 2              # consume "--project" and its value
-      ;;
-    --tasklist)
-      # Require a value to follow --tasklist.
-      [[ $# -ge 2 ]] || { echo "missing value for $1" >&2; exit 2; }
-      tasklist_id=$2
-      shift 2              # consume "--tasklist" and its value
       ;;
     -h|--help)
       usage
@@ -54,18 +43,6 @@ done
 # Reject a --project value that isn't a plain positive integer.
 if [[ -n $project_id && ! $project_id =~ ^[0-9]+$ ]]; then
   echo "invalid --project" >&2
-  exit 2
-fi
-
-# Reject a --tasklist value that isn't a plain positive integer.
-if [[ -n $tasklist_id && ! $tasklist_id =~ ^[0-9]+$ ]]; then
-  echo "invalid --tasklist" >&2
-  exit 2
-fi
-
-# freelo-cli's --tasklist filter is meaningless without --project.
-if [[ -n $tasklist_id && -z $project_id ]]; then
-  echo "--tasklist requires --project" >&2
   exit 2
 fi
 
@@ -161,9 +138,16 @@ if [[ -n $project_id ]]; then
     && unwrap_list "$tmp/tasklists.raw" >"$tmp/tasklists.json" \
     || printf '[]\n' >"$tmp/tasklists.json"
 
-  fetch tasks "$tmp/tasks.raw" tasks list --project "$project_id" \
-    && unwrap_list "$tmp/tasks.raw" >"$tmp/tasks.json" \
-    || printf '[]\n' >"$tmp/tasks.json"
+  # Fetch tasks per-tasklist (not one unfiltered project-wide call) so tasks
+  # that don't belong to any of this project's tasklists are excluded.
+  : >"$tmp/tasks.parts"
+  while IFS= read -r tl_id; do
+    [[ -n $tl_id ]] || continue
+    fetch "tasks_$tl_id" "$tmp/tasks_$tl_id.raw" tasks list --project "$project_id" --tasklist "$tl_id" \
+      && unwrap_list "$tmp/tasks_$tl_id.raw" >>"$tmp/tasks.parts" \
+      || true
+  done < <(jq -r '.[].id' "$tmp/tasklists.json")
+  jq -s 'add // []' "$tmp/tasks.parts" >"$tmp/tasks.json"
 fi
 
 # ---- Assemble final JSON ----
