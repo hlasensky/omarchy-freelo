@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "id": "hl.freelo",
+  "name": "Freelo",
+  "version": "0.1.0",
+  "author": "hlasensky",
+  "license": "MIT",
+  "description": "Quick time tracking, task CRUD, and project switching for Freelo.",
+  "kinds": ["bar-widget"],
+  "activation": "on-demand",
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Freelo",
+    "description": "Start/stop time tracking, manage tasks, and switch projects for Freelo from the bar. Requires freelo-cli (github.com/freeloio/freelo-cli) installed and authenticated (`freelo auth login`).",
+    "category": "Productivity",
+    "aliases": ["freelo", "tasks", "timetracking"],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "refreshIntervalSec": 30
+    },
+    "schema": [
+      { "key": "refreshIntervalSec", "type": "integer", "label": "Refresh interval (seconds)", "min": 10, "max": 300, "step": 5, "defaultValue": 30 }
+    ]
+  }
+}

@@ -1,0 +1,191 @@
+#!/usr/bin/env bash
+# Aggregate Freelo dashboard data (projects, tasklists, tasks, tracking
+# status) for the Omarchy Freelo widget. Authentication is delegated
+# entirely to freelo-cli's own credential store (OS keyring / env vars).
+
+# -u: error on unset variables. -o pipefail: a failing command in a pipeline
+# fails the whole pipeline. (No `-e` — this script checks exit codes itself
+# and always wants to fall through to emit JSON, even on failure.)
+set -uo pipefail
+
+# Optional --project ID filter; empty means "projects only, no tasklists/tasks".
+project_id=""
+# Optional --tasklist ID filter; narrows tasks to just this tasklist.
+# freelo-cli requires --project alongside --tasklist, so this is only valid
+# when project_id is also set.
+tasklist_id=""
+
+# Prints usage/help text.
+usage() {
+  cat <<'EOF'
+Usage: omarchy-freelo-refresh [--project ID] [--tasklist ID]
+  --project ID    Also fetch tasklists and tasks for this project ID
+  --tasklist ID   Narrow tasks to this tasklist (requires --project)
+EOF
+}
+
+# ---- Parse CLI args ----
+while (($#)); do          # loop while there are remaining args
+  case "$1" in
+    --project)
+      # Require a value to follow --project.
+      [[ $# -ge 2 ]] || { echo "missing value for $1" >&2; exit 2; }
+      project_id=$2
+      shift 2              # consume "--project" and its value
+      ;;
+    --tasklist)
+      # Require a value to follow --tasklist.
+      [[ $# -ge 2 ]] || { echo "missing value for $1" >&2; exit 2; }
+      tasklist_id=$2
+      shift 2              # consume "--tasklist" and its value
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "unknown option: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+# Reject a --project value that isn't a plain positive integer.
+if [[ -n $project_id && ! $project_id =~ ^[0-9]+$ ]]; then
+  echo "invalid --project" >&2
+  exit 2
+fi
+
+# Reject a --tasklist value that isn't a plain positive integer.
+if [[ -n $tasklist_id && ! $tasklist_id =~ ^[0-9]+$ ]]; then
+  echo "invalid --tasklist" >&2
+  exit 2
+fi
+
+# freelo-cli's --tasklist filter is meaningless without --project.
+if [[ -n $tasklist_id && -z $project_id ]]; then
+  echo "--tasklist requires --project" >&2
+  exit 2
+fi
+
+# jq is required to build/parse all JSON below — bail out early with a
+# valid (but empty) JSON payload if it's missing, so the widget doesn't crash.
+command -v jq >/dev/null 2>&1 || {
+  printf '%s\n' '{"schemaVersion":1,"state":"error","message":"jq is required.","projects":[],"tasklists":[],"tasks":[],"tracking":null}'
+  exit 0
+}
+
+# Builds a "nothing to show, here's why" JSON payload with the given
+# state (e.g. "logged-out") and human-readable message.
+emit_state() {
+  jq -n --arg state "$1" --arg message "$2" \
+    '{schemaVersion:1,state:$state,message:$message,projects:[],tasklists:[],tasks:[],tracking:null}'
+}
+
+# freelo-cli itself must be installed.
+command -v freelo >/dev/null 2>&1 || {
+  emit_state cli-not-installed "freelo-cli is not installed. See github.com/freeloio/freelo-cli."
+  exit 0
+}
+
+# Check whether freelo-cli currently has a valid login session.
+auth=$(freelo auth status --agent 2>/dev/null) || auth=""
+if [[ "$(jq -r '.authenticated // false' <<<"$auth" 2>/dev/null)" != "true" ]]; then
+  emit_state logged-out "Run 'freelo auth login' to connect Freelo."
+  exit 0
+fi
+
+# Scratch dir for raw/intermediate JSON from each freelo-cli call.
+if ! tmp=$(mktemp -d); then
+  emit_state error "Could not prepare temporary storage for the Freelo refresh."
+  exit 1
+fi
+trap 'rm -rf "$tmp"' EXIT   # always clean up the scratch dir on exit
+
+# Collects one-line error summaries from failed freelo-cli calls.
+warnings="$tmp/warnings"
+: >"$warnings"              # truncate/create empty file
+
+# `--agent` is documented as raw JSON, but whether a given endpoint's raw
+# shape is a bare array/object or wrapped in an envelope key isn't
+# guaranteed here without a live authenticated call — unwrap defensively so
+# a wrapped response doesn't come out as an empty list.
+
+# Given a file of raw freelo-cli JSON, print just the list part —
+# whether the top level IS the array, or the array is nested under
+# .data / .items / .projects / .tasklists / .tasks.
+unwrap_list() {
+  jq 'if type == "array" then . else (.data // .items // .projects // .tasklists // .tasks // []) end' "$1" 2>/dev/null
+}
+
+# Same idea as unwrap_list, but for a single JSON object instead of a list.
+unwrap_object() {
+  jq 'if type == "object" then (.data // .) else null end' "$1" 2>/dev/null
+}
+
+# Runs `freelo <args...> --agent`, saving stdout to $output.
+# On success: returns 0.
+# On failure: appends a truncated error line to $warnings and returns 1.
+#   $1 = label (used in warning text / error log filename)
+#   $2 = output file path
+#   $3.. = the freelo subcommand + args (e.g. `projects list`)
+fetch() {
+  local label=$1 output=$2
+  shift 2
+  if freelo "$@" --agent >"$output" 2>"$tmp/$label.err"; then
+    return 0
+  fi
+  # Flatten the error output to one line, capped at 200 chars, and log it.
+  printf '%s: %s\n' "$label" "$(tr '\n' ' ' <"$tmp/$label.err" | cut -c1-200)" >>"$warnings"
+  return 1
+}
+
+# ---- Fetch data ----
+
+# Projects list. On fetch failure, fall back to an empty array.
+fetch projects "$tmp/projects.raw" projects list \
+  && unwrap_list "$tmp/projects.raw" >"$tmp/projects.json" \
+  || printf '[]\n' >"$tmp/projects.json"
+
+# Current time-tracking status. On fetch failure, fall back to null.
+fetch tracking "$tmp/tracking.raw" tracking status \
+  && unwrap_object "$tmp/tracking.raw" >"$tmp/tracking.json" \
+  || printf 'null\n' >"$tmp/tracking.json"
+
+# Default tasklists/tasks to empty — only populated if --project was given.
+printf '[]\n' >"$tmp/tasklists.json"
+printf '[]\n' >"$tmp/tasks.json"
+if [[ -n $project_id ]]; then
+  fetch tasklists "$tmp/tasklists.raw" tasklists list --project "$project_id" \
+    && unwrap_list "$tmp/tasklists.raw" >"$tmp/tasklists.json" \
+    || printf '[]\n' >"$tmp/tasklists.json"
+
+  fetch tasks "$tmp/tasks.raw" tasks list --project "$project_id" \
+    && unwrap_list "$tmp/tasks.raw" >"$tmp/tasks.json" \
+    || printf '[]\n' >"$tmp/tasks.json"
+fi
+
+# ---- Assemble final JSON ----
+
+# De-duplicate warning lines and turn them into a JSON array of strings
+# (dropping any blank line).
+warnings_json=$(sort -u "$warnings" | jq -Rsc 'split("\n") | map(select(length > 0))')
+
+# Overall state is "ready" unless we have warnings AND zero projects came
+# back — that combination means the refresh effectively failed.
+state=ready
+message=""
+if [[ $(jq 'length' <<<"$warnings_json") -gt 0 && $(jq 'length' "$tmp/projects.json") -eq 0 ]]; then
+  state=error
+  message="Freelo data could not be loaded."
+fi
+
+# Stitch everything together into the final schema and print it to stdout.
+jq -n --arg state "$state" --arg message "$message" \
+  --slurpfile projects "$tmp/projects.json" \
+  --slurpfile tasklists "$tmp/tasklists.json" \
+  --slurpfile tasks "$tmp/tasks.json" \
+  --slurpfile tracking "$tmp/tracking.json" \
+  --argjson warnings "$warnings_json" \
+  '{schemaVersion:1,state:$state,message:$message,projects:$projects[0],tasklists:$tasklists[0],tasks:$tasks[0],tracking:$tracking[0],warnings:$warnings}'
