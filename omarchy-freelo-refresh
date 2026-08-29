@@ -119,25 +119,37 @@ fetch() {
 }
 
 # ---- Fetch data ----
+# Independent calls run in parallel — each `freelo` invocation pays its own
+# auth + HTTP round-trip, and running them one after another made total
+# refresh time scale with the number of calls instead of the slowest one.
 
-# Projects list. On fetch failure, fall back to an empty array.
-fetch projects "$tmp/projects.raw" projects list \
-  && unwrap_list "$tmp/projects.raw" >"$tmp/projects.json" \
-  || printf '[]\n' >"$tmp/projects.json"
+# Projects and tracking never depend on each other or on --project, and
+# tasklists only needs project_id, so all three fire at once.
+(
+  fetch projects "$tmp/projects.raw" projects list \
+    && unwrap_list "$tmp/projects.raw" >"$tmp/projects.json" \
+    || printf '[]\n' >"$tmp/projects.json"
+) &
 
-# Current time-tracking status. On fetch failure, fall back to null.
-fetch tracking "$tmp/tracking.raw" tracking status \
-  && unwrap_object "$tmp/tracking.raw" >"$tmp/tracking.json" \
-  || printf 'null\n' >"$tmp/tracking.json"
+(
+  fetch tracking "$tmp/tracking.raw" tracking status \
+    && unwrap_object "$tmp/tracking.raw" >"$tmp/tracking.json" \
+    || printf 'null\n' >"$tmp/tracking.json"
+) &
 
 # Default tasklists/tasks to empty — only populated if --project was given.
 printf '[]\n' >"$tmp/tasklists.json"
 printf '[]\n' >"$tmp/tasks.json"
 if [[ -n $project_id ]]; then
-  fetch tasklists "$tmp/tasklists.raw" tasklists list --project "$project_id" \
-    && unwrap_list "$tmp/tasklists.raw" >"$tmp/tasklists.json" \
-    || printf '[]\n' >"$tmp/tasklists.json"
+  (
+    fetch tasklists "$tmp/tasklists.raw" tasklists list --project "$project_id" \
+      && unwrap_list "$tmp/tasklists.raw" >"$tmp/tasklists.json" \
+      || printf '[]\n' >"$tmp/tasklists.json"
+  ) &
+fi
+wait
 
+if [[ -n $project_id ]]; then
   # Fetch tasks per-tasklist (not one unfiltered project-wide call) so tasks
   # that don't belong to any of this project's tasklists are excluded.
   # Verified against `tasks show`: tasklist-scoped `tasks list` already
@@ -145,17 +157,22 @@ if [[ -n $project_id ]]; then
   # --tasklist anyway (freelo-cli rejects that), so no extra filter needed.
   # Each task also gets tagged with its tasklist's id/name (not present in
   # the --agent list response) so the widget can show it under the task.
-  : >"$tmp/tasks.parts"
+  # Fired in parallel too — depends on tasklists.json, so it waits for the
+  # block above, then fans out one call per tasklist. Each job writes its
+  # own file (concurrent appends to one shared file would interleave).
   while IFS=$'\t' read -r tl_id tl_name; do
     [[ -n $tl_id ]] || continue
-    fetch "tasks_$tl_id" "$tmp/tasks_$tl_id.raw" tasks list --project "$project_id" --tasklist "$tl_id" \
-      && unwrap_list "$tmp/tasks_$tl_id.raw" \
-        | jq --arg id "$tl_id" --arg name "$tl_name" \
-          'map(. + {tasklist_id: ($id | tonumber), tasklist_name: $name})' \
-        >>"$tmp/tasks.parts" \
-      || true
+    (
+      fetch "tasks_$tl_id" "$tmp/tasks_$tl_id.raw" tasks list --project "$project_id" --tasklist "$tl_id" \
+        && unwrap_list "$tmp/tasks_$tl_id.raw" \
+          | jq --arg id "$tl_id" --arg name "$tl_name" \
+            'map(. + {tasklist_id: ($id | tonumber), tasklist_name: $name})' \
+          >"$tmp/tasks_$tl_id.tagged.json" \
+        || true
+    ) &
   done < <(jq -r '.[] | [.id, .name] | @tsv' "$tmp/tasklists.json")
-  jq -s 'add // []' "$tmp/tasks.parts" >"$tmp/tasks.json"
+  wait
+  jq -s 'add // []' "$tmp"/tasks_*.tagged.json >"$tmp/tasks.json" 2>/dev/null || printf '[]\n' >"$tmp/tasks.json"
 fi
 
 # ---- Assemble final JSON ----

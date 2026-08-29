@@ -216,6 +216,10 @@ Panel {
         opened ? close() : open();
     }
 
+    function openTask(task) {
+        Quickshell.execDetached(["omarchy-launch-browser", "https://app.freelo.io/task/" + String(task.id)]);
+    }
+
     KeyboardPanel {
         id: panel
         anchorItem: root.anchorItem
@@ -437,6 +441,13 @@ Panel {
                                 width: parent.width
                                 foreground: root.foreground
                                 implicitHeight: rowLayout.implicitHeight + Style.space(14)
+
+                                MouseArea {
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: root.openTask(taskRow.modelData)
+                                }
 
                                 RowLayout {
                                     id: rowLayout
