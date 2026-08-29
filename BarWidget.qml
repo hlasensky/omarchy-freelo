@@ -13,7 +13,7 @@ BarWidget {
   moduleName: "hl.freelo"
 
   readonly property int refreshIntervalSec: {
-    var value = parseInt(String(setting("refreshIntervalSec", 30)), 10)
+    let value = parseInt(String(setting("refreshIntervalSec", 30)), 10)
     if (!isFinite(value)) value = 30
     return Math.max(10, Math.min(300, value))
   }
@@ -22,20 +22,18 @@ BarWidget {
 
   property date now: new Date()
   readonly property bool tracking: !!(service.tracking && service.tracking.active)
-  // freelo-cli's --agent output reshapes the raw API response into its own
-  // JSON rather than passing it through, so the exact key names here are a
-  // best-effort guess across the plausible flat/nested shapes — verify by
-  // eye the first time a tracker is actually started from this widget.
+  // Confirmed against a live `freelo tracking status --agent` call: an
+  // active tracker nests everything under .server (.server.task.name,
+  // .server.date_reported) rather than at the top level.
   readonly property string trackingTaskName: tracking
-    ? String(service.tracking.taskName || service.tracking.task_name
-        || (service.tracking.task ? service.tracking.task.name : "") || "")
+    ? String((service.tracking.server && service.tracking.server.task) ? service.tracking.server.task.name : "")
     : ""
   readonly property string trackingStartedAt: tracking
-    ? String(service.tracking.startedAt || service.tracking.started_at || service.tracking.date_reported || "")
+    ? String((service.tracking.server && service.tracking.server.date_reported) || "")
     : ""
   readonly property int elapsedSeconds: {
     if (!tracking || trackingStartedAt === "") return 0
-    var started = Date.parse(trackingStartedAt)
+    const started = Date.parse(trackingStartedAt)
     if (!isFinite(started)) return 0
     return Math.max(0, Math.floor((now.getTime() - started) / 1000))
   }
@@ -43,9 +41,9 @@ BarWidget {
   function pad(n) { return (n < 10 ? "0" : "") + n }
 
   function formatElapsed(totalSeconds) {
-    var hours = Math.floor(totalSeconds / 3600)
-    var minutes = Math.floor((totalSeconds % 3600) / 60)
-    var seconds = totalSeconds % 60
+    const hours = Math.floor(totalSeconds / 3600)
+    const minutes = Math.floor((totalSeconds % 3600) / 60)
+    const seconds = totalSeconds % 60
     return hours > 0 ? (hours + ":" + pad(minutes) + ":" + pad(seconds)) : (pad(minutes) + ":" + pad(seconds))
   }
 
@@ -80,7 +78,7 @@ BarWidget {
   }
 
   function injectPanel() {
-    var target = panelLoader.item
+    const target = panelLoader.item
     if (!target) return
     if ("bar" in target) target.bar = root.bar
     if ("settings" in target) target.settings = root.settings

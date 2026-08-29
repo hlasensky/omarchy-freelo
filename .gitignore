@@ -1,0 +1,4 @@
+# Local qmlls/editor setup — machine-specific paths, not part of the plugin.
+.qml-stubs/
+.qmlls.ini
+.vscode/

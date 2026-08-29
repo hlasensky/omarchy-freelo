@@ -24,7 +24,7 @@ Item {
   readonly property bool busy: actionProcess.running
 
   function setting(name, fallback) {
-    var value = settings ? settings[name] : undefined
+    const value = settings ? settings[name] : undefined
     return value === undefined || value === null || value === "" ? fallback : value
   }
 
@@ -44,7 +44,7 @@ Item {
     loading = true
     _stdout = ""
     _stderr = ""
-    var args = [helperPath()]
+    const args = [helperPath()]
     if (selectedProjectId !== "") args.push("--project", selectedProjectId)
     fetchProcess.command = args
     fetchProcess.running = true
@@ -52,7 +52,7 @@ Item {
 
   function apply(raw) {
     try {
-      var data = JSON.parse(String(raw || ""))
+      const data = JSON.parse(String(raw || ""))
       state = String(data.state || "error")
       message = String(data.message || "")
       projects = Array.isArray(data.projects) ? data.projects : []
@@ -76,7 +76,7 @@ Item {
 
   function createTask(name, dueDate, priority) {
     if (selectedProjectId === "" || selectedTasklistId === "" || String(name || "").trim() === "") return
-    var args = ["tasks", "create", "--project", selectedProjectId, "--tasklist", selectedTasklistId, "--name", String(name).trim()]
+    const args = ["tasks", "create", "--project", selectedProjectId, "--tasklist", selectedTasklistId, "--name", String(name).trim()]
     if (dueDate) args.push("--due-date", dueDate)
     if (priority) args.push("--priority", priority)
     runAction(args)
@@ -129,8 +129,8 @@ Item {
     command: []
     onExited: function(exitCode) {
       root.loading = false
-      var stdout = String(output.text || root._stdout || "")
-      var stderr = String(errors.text || root._stderr || "").trim()
+      const stdout = String(output.text || root._stdout || "")
+      const stderr = String(errors.text || root._stderr || "").trim()
       if (stdout.trim() !== "") {
         root.apply(stdout)
       } else {
@@ -166,7 +166,7 @@ Item {
     running: false
     command: []
     onExited: function(exitCode) {
-      var callback = actionProcess.onDoneCallback
+      const callback = actionProcess.onDoneCallback
       actionProcess.onDoneCallback = null
       if (callback) callback()
       root.refreshQueued = false
