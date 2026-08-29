@@ -10,6 +10,8 @@ CRUD, and project switching without leaving the bar.
 - Per-task row actions: start tracking, finish, rename, delete
 - Click a task row to open it in the browser
 
+![preview](./preview.png)
+
 ## Requirements
 
 - [freelo-cli](https://github.com/freeloio/freelo-cli), installed and
