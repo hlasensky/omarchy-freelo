@@ -39,8 +39,8 @@ Panel {
         for (let i = 0; i < all.length; i++) {
             const p = all[i];
             rows.push({
-                value: String(p.id),
-                label: String(p.name || p.title || ("Project " + p.id))
+                value: p.id,
+                label: p.name || ("Project " + p.id)
             });
         }
         return rows;
@@ -52,27 +52,19 @@ Panel {
         for (let i = 0; i < all.length; i++) {
             const t = all[i];
             rows.push({
-                value: String(t.id),
-                label: String(t.name || t.title || ("Tasklist " + t.id))
+                value: t.id,
+                label: t.name || ("Tasklist " + t.id)
             });
         }
         return rows;
     }
 
     function isTaskFinished(task) {
-        if (!task)
-            return false;
-        // Confirmed against a real account: freelo-cli's raw task JSON nests
-        // state as { id, state } with state.state one of "active"/"finished"/…
-        if (task.state && typeof task.state === "object" && String(task.state.state || "").toLowerCase() === "finished")
-            return true;
-        if (task.finished === true || task.is_finished === true)
-            return true;
-        return false;
+        return !!(task && task.finished);
     }
 
     function dueDateLabel(task) {
-        const raw = String((task && (task.due_date || task.dueDate)) || "");
+        const raw = String((task && task.dueDate) || "");
         if (raw === "")
             return "";
         const datePart = raw.split(" ")[0];
@@ -90,7 +82,7 @@ Panel {
             const task = all[i];
             if (isTaskFinished(task))
                 continue;
-            if (needle !== "" && String(task.name || task.title || "").toLowerCase().indexOf(needle) === -1)
+            if (needle !== "" && task.name.toLowerCase().indexOf(needle) === -1)
                 continue;
             rows.push(task);
         }
@@ -161,8 +153,8 @@ Panel {
     }
 
     function beginRename(task) {
-        renamingTaskId = String(task.id);
-        renameText = String(task.name || task.title || "");
+        renamingTaskId = task.id;
+        renameText = task.name;
     }
 
     function commitRename() {
@@ -179,8 +171,8 @@ Panel {
     }
 
     function requestDelete(task) {
-        pendingDeleteId = String(task.id);
-        pendingDeleteName = String(task.name || task.title || ("task " + task.id));
+        pendingDeleteId = task.id;
+        pendingDeleteName = task.name || ("task " + task.id);
     }
 
     function confirmDelete() {
@@ -286,8 +278,7 @@ Panel {
                             if (root.service.state !== "ready")
                                 return root.service.message;
                             if (root.service.tracking && root.service.tracking.active) {
-                                const srv = root.service.tracking.server;
-                                const name = String((srv && srv.task) ? srv.task.name : "");
+                                const name = root.service.tracking.taskName;
                                 return name !== "" ? ("Tracking " + name) : "Tracking";
                             }
                             return "Not tracking";
@@ -487,7 +478,7 @@ Panel {
 
                                         Text {
                                             Layout.fillWidth: true
-                                            text: String(taskRow.modelData.name || taskRow.modelData.title || "")
+                                            text: taskRow.modelData.name
                                             textFormat: Text.PlainText
                                             color: root.foreground
                                             font.family: root.fontFamily
@@ -498,7 +489,7 @@ Panel {
                                         Text {
                                             visible: text !== ""
                                             Layout.fillWidth: true
-                                            text: String(taskRow.modelData.tasklist_name || "")
+                                            text: taskRow.modelData.tasklistName
                                             textFormat: Text.PlainText
                                             color: root.dim
                                             font.family: root.fontFamily

@@ -28,6 +28,65 @@ Item {
         return value === undefined || value === null || value === "" ? fallback : value;
     }
 
+    // ---- DTOs ----------------------------------------------------------
+    // freelo-cli's raw JSON is inconsistent across endpoints (name vs
+    // title, due_date vs dueDate, nested state.state, tracking's
+    // server.task.name nesting). These normalize every response into one
+    // fixed shape so the rest of the plugin never has to guess a field's
+    // presence or spelling.
+
+    function toTask(raw) {
+        const state = raw.state && typeof raw.state === "object" ? raw.state : null;
+        return {
+            id: String(raw.id ?? ""),
+            name: String(raw.name || raw.title || ""),
+            tasklistId: raw.tasklist_id ?? null,
+            tasklistName: String(raw.tasklist_name || ""),
+            worker: raw.worker || null,
+            priority: raw.priority ?? raw.priority_enum ?? null,
+            dueDate: String(raw.due_date || raw.dueDate || ""),
+            finished: raw.finished === true || raw.is_finished === true || (state !== null && String(state.state || "").toLowerCase() === "finished")
+        };
+    }
+
+    function toProject(raw) {
+        return {
+            id: String(raw.id ?? ""),
+            name: String(raw.name || raw.title || "")
+        };
+    }
+
+    function toTasklist(raw) {
+        return {
+            id: String(raw.id ?? ""),
+            name: String(raw.name || raw.title || "")
+        };
+    }
+
+    // Also the shape used for the optimistic local update in startTracking/
+    // stopTracking below — flattened so callers never need to know about
+    // the server's .server.task.name nesting.
+    function toTracking(raw) {
+        if (!raw || typeof raw !== "object")
+            return null;
+        const server = raw.server && typeof raw.server === "object" ? raw.server : null;
+        const task = server && server.task && typeof server.task === "object" ? server.task : null;
+        return {
+            active: !!raw.active,
+            taskName: String((task && task.name) || ""),
+            startedAt: String((server && server.date_reported) || "")
+        };
+    }
+
+    function makeTrackingState(taskId) {
+        const task = root.tasks.find(t => t.id === String(taskId));
+        return {
+            active: true,
+            taskName: task ? task.name : "",
+            startedAt: new Date().toISOString()
+        };
+    }
+
     readonly property string selectedProjectId: String(setting("selectedProjectId", ""))
     readonly property string selectedTasklistId: String(setting("selectedTasklistId", ""))
 
@@ -56,10 +115,10 @@ Item {
             const data = JSON.parse(String(raw || ""));
             state = String(data.state || "error");
             message = String(data.message || "");
-            projects = Array.isArray(data.projects) ? data.projects : [];
-            tasklists = Array.isArray(data.tasklists) ? data.tasklists : [];
-            tasks = Array.isArray(data.tasks) ? data.tasks : [];
-            tracking = data.tracking && typeof data.tracking === "object" ? data.tracking : null;
+            projects = Array.isArray(data.projects) ? data.projects.map(toProject) : [];
+            tasklists = Array.isArray(data.tasklists) ? data.tasklists.map(toTasklist) : [];
+            tasks = Array.isArray(data.tasks) ? data.tasks.map(toTask) : [];
+            tracking = toTracking(data.tracking);
         } catch (error) {
             state = "error";
             message = "Freelo returned an unreadable response.";
@@ -110,30 +169,12 @@ Item {
         if (root.tracking && root.tracking.active) {
             runAction(["tracking", "stop"], function () {
                 runAction(["tracking", "start", "--task", String(taskId)], function () {
-                    tracking = {
-                        active: true,
-                        server: {
-                            task: {
-                                id: taskId,
-                                name: tasks.find(t => String(t.id) === String(taskId))?.name || ""
-                            },
-                            date_reported: new Date().toISOString()
-                        }
-                    };
+                    tracking = makeTrackingState(taskId);
                 });
             });
         } else {
             runAction(["tracking", "start", "--task", String(taskId)], function () {
-                tracking = {
-                    active: true,
-                    server: {
-                        task: {
-                            id: taskId,
-                            name: tasks.find(t => String(t.id) === String(taskId))?.name || ""
-                        },
-                        date_reported: new Date().toISOString()
-                    }
-                };
+                tracking = makeTrackingState(taskId);
             });
         }
     }
@@ -142,7 +183,8 @@ Item {
         runAction(["tracking", "stop"], function () {
             tracking = {
                 active: false,
-                server: null
+                taskName: "",
+                startedAt: ""
             };
         });
     }
@@ -203,7 +245,7 @@ Item {
         onExited: function (exitCode) {
             const callback = actionProcess.onDoneCallback;
             actionProcess.onDoneCallback = null;
-            if (callback)
+            if (callback && exitCode === 0)
                 callback();
             root.refreshQueued = false;
             Qt.callLater(root.refresh);

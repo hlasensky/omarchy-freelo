@@ -15,7 +15,7 @@ project_id=""
 usage() {
   cat <<'EOF'
 Usage: omarchy-freelo-refresh [--project ID]
-  --project ID   Also fetch tasklists and tasks (per-tasklist) for this project ID
+  --project ID   Also fetch tasklists and tasks for this project ID
 EOF
 }
 
@@ -141,39 +141,33 @@ fetch() {
 printf '[]\n' >"$tmp/tasklists.json"
 printf '[]\n' >"$tmp/tasks.json"
 if [[ -n $project_id ]]; then
+  # Tasklists — only needed for the quick-add tasklist dropdown now (tasks
+  # below no longer depend on it).
   (
     fetch tasklists "$tmp/tasklists.raw" tasklists list --project "$project_id" \
       && unwrap_list "$tmp/tasklists.raw" >"$tmp/tasklists.json" \
       || printf '[]\n' >"$tmp/tasklists.json"
   ) &
+
+  # Tasks — one call across the whole project via the /all-tasks endpoint
+  # (state_id=1 = active, matching the previous per-tasklist calls' default
+  # active-only behavior), instead of one `tasks list` call per tasklist.
+  # No CLI subcommand exposes this endpoint's richer per-task fields
+  # (priority_enum, due_date, tasklist{id,name}) — tasklist-scoped
+  # `tasks list` only ever returned {id, name, worker} — so this goes
+  # through the raw `api get` passthrough. project_id is validated
+  # ^[0-9]+$ above, safe to interpolate into the query string.
+  (
+    fetch tasks "$tmp/tasks.raw" api get "/all-tasks?projects_ids[]=$project_id&state_id=1" \
+      && jq '(.data.tasks // []) | map({
+          id, name, worker, priority_enum, due_date,
+          tasklist_id: .tasklist.id,
+          tasklist_name: .tasklist.name
+        })' "$tmp/tasks.raw" >"$tmp/tasks.json" \
+      || printf '[]\n' >"$tmp/tasks.json"
+  ) &
 fi
 wait
-
-if [[ -n $project_id ]]; then
-  # Fetch tasks per-tasklist (not one unfiltered project-wide call) so tasks
-  # that don't belong to any of this project's tasklists are excluded.
-  # Verified against `tasks show`: tasklist-scoped `tasks list` already
-  # returns active tasks only by default — --state can't be combined with
-  # --tasklist anyway (freelo-cli rejects that), so no extra filter needed.
-  # Each task also gets tagged with its tasklist's id/name (not present in
-  # the --agent list response) so the widget can show it under the task.
-  # Fired in parallel too — depends on tasklists.json, so it waits for the
-  # block above, then fans out one call per tasklist. Each job writes its
-  # own file (concurrent appends to one shared file would interleave).
-  while IFS=$'\t' read -r tl_id tl_name; do
-    [[ -n $tl_id ]] || continue
-    (
-      fetch "tasks_$tl_id" "$tmp/tasks_$tl_id.raw" tasks list --project "$project_id" --tasklist "$tl_id" \
-        && unwrap_list "$tmp/tasks_$tl_id.raw" \
-          | jq --arg id "$tl_id" --arg name "$tl_name" \
-            'map(. + {tasklist_id: ($id | tonumber), tasklist_name: $name})' \
-          >"$tmp/tasks_$tl_id.tagged.json" \
-        || true
-    ) &
-  done < <(jq -r '.[] | [.id, .name] | @tsv' "$tmp/tasklists.json")
-  wait
-  jq -s 'add // []' "$tmp"/tasks_*.tagged.json >"$tmp/tasks.json" 2>/dev/null || printf '[]\n' >"$tmp/tasks.json"
-fi
 
 # ---- Assemble final JSON ----
 

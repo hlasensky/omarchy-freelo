@@ -22,15 +22,8 @@ BarWidget {
 
   property date now: new Date()
   readonly property bool tracking: !!(service.tracking && service.tracking.active)
-  // Confirmed against a live `freelo tracking status --agent` call: an
-  // active tracker nests everything under .server (.server.task.name,
-  // .server.date_reported) rather than at the top level.
-  readonly property string trackingTaskName: tracking
-    ? String((service.tracking.server && service.tracking.server.task) ? service.tracking.server.task.name : "")
-    : ""
-  readonly property string trackingStartedAt: tracking
-    ? String((service.tracking.server && service.tracking.server.date_reported) || "")
-    : ""
+  readonly property string trackingTaskName: tracking ? service.tracking.taskName : ""
+  readonly property string trackingStartedAt: tracking ? service.tracking.startedAt : ""
   readonly property int elapsedSeconds: {
     if (!tracking || trackingStartedAt === "") return 0
     const started = Date.parse(trackingStartedAt)
