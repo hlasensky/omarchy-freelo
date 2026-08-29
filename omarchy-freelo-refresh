@@ -140,13 +140,21 @@ if [[ -n $project_id ]]; then
 
   # Fetch tasks per-tasklist (not one unfiltered project-wide call) so tasks
   # that don't belong to any of this project's tasklists are excluded.
+  # Verified against `tasks show`: tasklist-scoped `tasks list` already
+  # returns active tasks only by default — --state can't be combined with
+  # --tasklist anyway (freelo-cli rejects that), so no extra filter needed.
+  # Each task also gets tagged with its tasklist's id/name (not present in
+  # the --agent list response) so the widget can show it under the task.
   : >"$tmp/tasks.parts"
-  while IFS= read -r tl_id; do
+  while IFS=$'\t' read -r tl_id tl_name; do
     [[ -n $tl_id ]] || continue
     fetch "tasks_$tl_id" "$tmp/tasks_$tl_id.raw" tasks list --project "$project_id" --tasklist "$tl_id" \
-      && unwrap_list "$tmp/tasks_$tl_id.raw" >>"$tmp/tasks.parts" \
+      && unwrap_list "$tmp/tasks_$tl_id.raw" \
+        | jq --arg id "$tl_id" --arg name "$tl_name" \
+          'map(. + {tasklist_id: ($id | tonumber), tasklist_name: $name})' \
+        >>"$tmp/tasks.parts" \
       || true
-  done < <(jq -r '.[].id' "$tmp/tasklists.json")
+  done < <(jq -r '.[] | [.id, .name] | @tsv' "$tmp/tasklists.json")
   jq -s 'add // []' "$tmp/tasks.parts" >"$tmp/tasks.json"
 fi
 
