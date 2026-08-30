@@ -27,6 +27,7 @@ Panel {
     readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 
     property string taskFilter: ""
+    property string selectedTaskTasklistId: ""
     property string quickAddText: ""
     property string renamingTaskId: ""
     property string renameText: ""
@@ -59,6 +60,16 @@ Panel {
         return rows;
     }
 
+    // Tabs above the task list — filters by tasklist instead of showing
+    // every open task in one flat list. "All" (empty value) plus one tab
+    // per tasklist, reusing the same list tasklistOptions already builds.
+    readonly property var taskTabOptions: [
+        {
+            value: "",
+            label: "All"
+        }
+    ].concat(root.tasklistOptions)
+
     function isTaskFinished(task) {
         return !!(task && task.finished);
     }
@@ -82,10 +93,20 @@ Panel {
             const task = all[i];
             if (isTaskFinished(task))
                 continue;
+            if (root.selectedTaskTasklistId !== "" && task.tasklistId !== root.selectedTaskTasklistId)
+                continue;
             if (needle !== "" && task.name.toLowerCase().indexOf(needle) === -1)
                 continue;
             rows.push(task);
         }
+        // Oldest first, same order Freelo's own task list shows them in.
+        rows.sort((a, b) => {
+            const ta = Date.parse(a.createdAt);
+            const tb = Date.parse(b.createdAt);
+            if (!isFinite(ta) || !isFinite(tb))
+                return 0;
+            return ta - tb;
+        });
         return rows;
     }
 
@@ -129,11 +150,13 @@ Panel {
 
     function selectProject(id) {
         // A tasklist belongs to exactly one project, so a stale tasklist id
-        // would otherwise let quick-add silently target the wrong project.
+        // would otherwise let quick-add silently target the wrong project,
+        // and a stale tab would show an empty list until manually reset.
         persistSettings({
             selectedProjectId: id,
             selectedTasklistId: ""
         });
+        root.selectedTaskTasklistId = "";
         if (service)
             service.refresh();
     }
@@ -395,6 +418,42 @@ Panel {
                         fontFamily: root.fontFamily
                     }
 
+                    Flickable {
+                        id: tabsFlick
+                        width: parent.width
+                        implicitHeight: taskTabs.implicitHeight
+                        contentWidth: taskTabs.implicitWidth
+                        contentHeight: taskTabs.implicitHeight
+                        clip: true
+                        boundsBehavior: Flickable.StopAtBounds
+                        flickableDirection: Flickable.HorizontalFlick
+                        interactive: contentWidth > width
+
+                        // Flickable only maps its own axis to flick/drag,
+                        // not the mouse wheel — a vertical wheel scroll
+                        // here would otherwise fall through to panelFlick
+                        // and scroll the whole panel instead of the tabs.
+                        WheelHandler {
+                            target: null
+                            acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+                            onWheel: function (event) {
+                                const delta = event.angleDelta.y !== 0 ? event.angleDelta.y : event.angleDelta.x;
+                                tabsFlick.contentX = Math.max(0, Math.min(tabsFlick.contentWidth - tabsFlick.width, tabsFlick.contentX - delta));
+                            }
+                        }
+
+                        ButtonGroup {
+                            id: taskTabs
+                            options: root.taskTabOptions
+                            value: root.selectedTaskTasklistId
+                            foreground: root.foreground
+                            fontFamily: root.fontFamily
+                            onChanged: function (value) {
+                                root.selectedTaskTasklistId = value;
+                            }
+                        }
+                    }
+
                     TextField {
                         id: filterField
                         width: parent.width
@@ -483,17 +542,6 @@ Panel {
                                             color: root.foreground
                                             font.family: root.fontFamily
                                             font.pixelSize: Style.font.body
-                                            elide: Text.ElideRight
-                                        }
-
-                                        Text {
-                                            visible: text !== ""
-                                            Layout.fillWidth: true
-                                            text: taskRow.modelData.tasklistName
-                                            textFormat: Text.PlainText
-                                            color: root.dim
-                                            font.family: root.fontFamily
-                                            font.pixelSize: Style.font.caption
                                             elide: Text.ElideRight
                                         }
 

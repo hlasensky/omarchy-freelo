@@ -160,7 +160,7 @@ if [[ -n $project_id ]]; then
   (
     fetch tasks "$tmp/tasks.raw" api get "/all-tasks?projects_ids[]=$project_id&state_id=1" \
       && jq '(.data.tasks // []) | map({
-          id, name, worker, priority_enum, due_date,
+          id, name, worker, priority_enum, due_date, date_add,
           tasklist_id: .tasklist.id,
           tasklist_name: .tasklist.name
         })' "$tmp/tasks.raw" >"$tmp/tasks.json" \

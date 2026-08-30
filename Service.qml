@@ -40,11 +40,12 @@ Item {
         return {
             id: String(raw.id ?? ""),
             name: String(raw.name || raw.title || ""),
-            tasklistId: raw.tasklist_id ?? null,
+            tasklistId: raw.tasklist_id !== undefined && raw.tasklist_id !== null ? String(raw.tasklist_id) : null,
             tasklistName: String(raw.tasklist_name || ""),
             worker: raw.worker || null,
             priority: raw.priority ?? raw.priority_enum ?? null,
             dueDate: String(raw.due_date || raw.dueDate || ""),
+            createdAt: String(raw.date_add || ""),
             finished: raw.finished === true || raw.is_finished === true || (state !== null && String(state.state || "").toLowerCase() === "finished")
         };
     }
