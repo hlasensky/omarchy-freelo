@@ -25,6 +25,15 @@ CRUD, and project switching without leaving the bar.
 omarchy plugin add https://github.com/hlasensky/omarchy-freelo.git --enable
 ```
 
+## How it works
+
+The plugin ships `omarchy-freelo-refresh`, a bundled bash script that shells
+out to `freelo-cli` and `jq` to aggregate projects/tasklists/tasks/tracking
+status into one JSON payload. The Service.qml singleton invokes it directly
+from the plugin directory it's part of this plugin, not a separately
+installed dependency, and touches no credentials of its own (auth stays in
+freelo-cli's own store).
+
 ## Configure
 
 Refresh interval (10–300s, default 30s) is set through the Omarchy shell's
