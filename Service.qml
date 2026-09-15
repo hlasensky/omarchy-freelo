@@ -21,7 +21,18 @@ Item {
     property string _stdout: ""
     property string _stderr: ""
     property bool refreshQueued: false
+    property bool _fetchTimedOut: false
     readonly property bool busy: actionProcess.running
+
+    // Backstop against a stalled or oversized helper response: the helper
+    // script (omarchy-freelo-refresh) already enforces its own per-call and
+    // whole-job deadlines plus a response byte ceiling, but this side
+    // shouldn't trust that unconditionally -- it holds the same limits
+    // independently so a wedged/oversized process can't be collected in
+    // full or keep this recurring Process alive indefinitely.
+    readonly property int fetchDeadlineMs: 60000
+    readonly property int fetchKillGraceMs: 5000
+    readonly property int maxResponseChars: 8 * 1024 * 1024
 
     function setting(name, fallback) {
         const value = settings ? settings[name] : undefined;
@@ -104,11 +115,13 @@ Item {
         loading = true;
         _stdout = "";
         _stderr = "";
+        _fetchTimedOut = false;
         const args = [helperPath()];
         if (selectedProjectId !== "")
             args.push("--project", selectedProjectId);
         fetchProcess.command = args;
         fetchProcess.running = true;
+        fetchDeadline.restart();
     }
 
     function apply(raw) {
@@ -200,6 +213,34 @@ Item {
         onTriggered: root.refresh()
     }
 
+    // Whole-job deadline for fetchProcess: the helper script already
+    // self-limits (see omarchy-freelo-refresh), but this is an independent
+    // backstop so a wedged helper can't keep the recurring Process running
+    // forever regardless of what the script does.
+    Timer {
+        id: fetchDeadline
+        interval: root.fetchDeadlineMs
+        repeat: false
+        onTriggered: {
+            if (fetchProcess.running) {
+                root._fetchTimedOut = true;
+                fetchProcess.signal(15); // SIGTERM
+                fetchKill.restart();
+            }
+        }
+    }
+
+    // Escalates to SIGKILL if the process ignores/survives the SIGTERM above.
+    Timer {
+        id: fetchKill
+        interval: root.fetchKillGraceMs
+        repeat: false
+        onTriggered: {
+            if (fetchProcess.running)
+                fetchProcess.signal(9); // SIGKILL
+        }
+    }
+
     Process {
         id: fetchProcess
 
@@ -207,9 +248,14 @@ Item {
         command: []
         onExited: function (exitCode) {
             root.loading = false;
+            fetchDeadline.stop();
+            fetchKill.stop();
             const stdout = String(output.text || root._stdout || "");
             const stderr = String(errors.text || root._stderr || "").trim();
-            if (stdout.trim() !== "") {
+            if (root._fetchTimedOut) {
+                root.state = "error";
+                root.message = "Freelo data refresh aborted (timed out or response too large).";
+            } else if (stdout.trim() !== "") {
                 root.apply(stdout);
             } else {
                 root.state = "error";
@@ -225,6 +271,18 @@ Item {
             id: output
 
             waitForEnd: true
+            // Enforce the byte ceiling while the response is being
+            // produced, before it ever reaches JSON.parse in apply() --
+            // kill the producer as soon as collected text crosses the
+            // limit instead of waiting for the stream (or the helper's
+            // own cap) to end.
+            onDataChanged: {
+                if (text.length > root.maxResponseChars && fetchProcess.running) {
+                    root._fetchTimedOut = true;
+                    fetchProcess.signal(15); // SIGTERM
+                    fetchKill.restart();
+                }
+            }
             onStreamFinished: root._stdout = text
         }
 

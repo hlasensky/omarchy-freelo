@@ -1,17 +1,25 @@
 #!/usr/bin/env bash
-# Aggregate Freelo dashboard data (projects, tasklists, tasks, tracking
-# status) for the Omarchy Freelo widget. Authentication is delegated
-# entirely to freelo-cli's own credential store (OS keyring / env vars).
+# Aggregates Freelo dashboard data for the Omarchy Freelo widget.
+# Auth is delegated to freelo-cli's own credential store.
 
-# -u: error on unset variables. -o pipefail: a failing command in a pipeline
-# fails the whole pipeline. (No `-e` — this script checks exit codes itself
-# and always wants to fall through to emit JSON, even on failure.)
-set -uo pipefail
+set -uo pipefail   # -u: catch unset vars. pipefail: no -e, we handle exit codes ourselves and always emit JSON.
 
-# Optional --project ID filter; empty means "projects only, no tasklists/tasks".
-project_id=""
+# Deadlines/limits for every credentialed `freelo` call.
+readonly PER_CALL_TIMEOUT_SEC=15
+readonly PER_CALL_KILL_AFTER_SEC=5
+readonly MAX_RESPONSE_BYTES=$((2 * 1024 * 1024))   # per-response cap, enforced while streaming in
+readonly WHOLE_JOB_TIMEOUT_SEC=45
+readonly WHOLE_JOB_KILL_AFTER_SEC=5
 
-# Prints usage/help text.
+# Re-exec once under `timeout` for a hard whole-job deadline (backstop beyond
+# the per-call ones below). Guarded so it doesn't recurse.
+if [[ -z ${FREELO_REFRESH_REEXEC:-} ]] && command -v timeout >/dev/null 2>&1; then
+  export FREELO_REFRESH_REEXEC=1
+  exec timeout --kill-after="${WHOLE_JOB_KILL_AFTER_SEC}s" "${WHOLE_JOB_TIMEOUT_SEC}s" "$0" "$@"
+fi
+
+project_id=""   # --project ID; empty means "projects only, no tasklists/tasks"
+
 usage() {
   cat <<'EOF'
 Usage: omarchy-freelo-refresh [--project ID]
@@ -19,14 +27,12 @@ Usage: omarchy-freelo-refresh [--project ID]
 EOF
 }
 
-# ---- Parse CLI args ----
-while (($#)); do          # loop while there are remaining args
+while (($#)); do
   case "$1" in
     --project)
-      # Require a value to follow --project.
       [[ $# -ge 2 ]] || { echo "missing value for $1" >&2; exit 2; }
       project_id=$2
-      shift 2              # consume "--project" and its value
+      shift 2
       ;;
     -h|--help)
       usage
@@ -40,91 +46,115 @@ while (($#)); do          # loop while there are remaining args
   esac
 done
 
-# Reject a --project value that isn't a plain positive integer.
 if [[ -n $project_id && ! $project_id =~ ^[0-9]+$ ]]; then
   echo "invalid --project" >&2
   exit 2
 fi
 
-# jq is required to build/parse all JSON below — bail out early with a
-# valid (but empty) JSON payload if it's missing, so the widget doesn't crash.
+# Bail out with valid-but-empty JSON if required tools are missing, so the widget doesn't crash.
 command -v jq >/dev/null 2>&1 || {
   printf '%s\n' '{"schemaVersion":1,"state":"error","message":"jq is required.","projects":[],"tasklists":[],"tasks":[],"tracking":null}'
   exit 0
 }
 
-# Builds a "nothing to show, here's why" JSON payload with the given
-# state (e.g. "logged-out") and human-readable message.
 emit_state() {
   jq -n --arg state "$1" --arg message "$2" \
     '{schemaVersion:1,state:$state,message:$message,projects:[],tasklists:[],tasks:[],tracking:null}'
 }
 
-# freelo-cli itself must be installed.
 command -v freelo >/dev/null 2>&1 || {
   emit_state cli-not-installed "freelo-cli is not installed. See github.com/freeloio/freelo-cli."
   exit 0
 }
 
-# Check whether freelo-cli currently has a valid login session.
-auth=$(freelo auth status --agent 2>/dev/null) || auth=""
+if ! tmp=$(mktemp -d); then
+  emit_state error "Could not prepare temporary storage for the Freelo refresh."
+  exit 1
+fi
+trap 'rm -rf "$tmp"' EXIT
+
+# Runs a command ($3..) under the per-call deadline/byte cap above.
+# setsid puts it (pid==pgid) in its own process group so, after it returns,
+# the whole group -- including any children it spawned -- can be reaped by
+# signaling -$pid, not just the immediate child `timeout` itself would reach.
+run_capped() {
+  local out=$1 err=$2
+  shift 2
+  local fifo="$out.fifo"
+  rm -f "$fifo"
+  mkfifo "$fifo"
+
+  setsid timeout --kill-after="${PER_CALL_KILL_AFTER_SEC}s" "${PER_CALL_TIMEOUT_SEC}s" \
+    "$@" >"$fifo" 2>"$err" &
+  local pid=$!
+
+  head -c "$MAX_RESPONSE_BYTES" <"$fifo" >"$out"
+  rm -f "$fifo"
+
+  wait "$pid"
+  local rc=$?
+
+  # Guard against a reaped pid being recycled by the OS before this fires --
+  # only signal the group if it's still alive under that pid.
+  if kill -0 -- "-$pid" 2>/dev/null; then
+    kill -TERM -- "-$pid" 2>/dev/null
+    kill -KILL -- "-$pid" 2>/dev/null
+  fi
+
+  return "$rc"
+}
+
+warnings="$tmp/warnings"
+: >"$warnings"
+
+auth_err="$tmp/auth.err"
+if run_capped "$tmp/auth.raw" "$auth_err" freelo auth status --agent \
+    && [[ $(wc -c <"$tmp/auth.raw") -lt $MAX_RESPONSE_BYTES ]]; then
+  auth=$(<"$tmp/auth.raw")
+else
+  auth=""
+fi
 if [[ "$(jq -r '.authenticated // false' <<<"$auth" 2>/dev/null)" != "true" ]]; then
   emit_state logged-out "Run 'freelo auth login' to connect Freelo."
   exit 0
 fi
 
-# Scratch dir for raw/intermediate JSON from each freelo-cli call.
-if ! tmp=$(mktemp -d); then
-  emit_state error "Could not prepare temporary storage for the Freelo refresh."
-  exit 1
-fi
-trap 'rm -rf "$tmp"' EXIT   # always clean up the scratch dir on exit
-
-# Collects one-line error summaries from failed freelo-cli calls.
-warnings="$tmp/warnings"
-: >"$warnings"              # truncate/create empty file
-
-# `--agent` is documented as raw JSON, but whether a given endpoint's raw
-# shape is a bare array/object or wrapped in an envelope key isn't
-# guaranteed here without a live authenticated call — unwrap defensively so
-# a wrapped response doesn't come out as an empty list.
-
-# Given a file of raw freelo-cli JSON, print just the list part —
-# whether the top level IS the array, or the array is nested under
-# .data / .items / .projects / .tasklists / .tasks.
+# `--agent` raw JSON isn't guaranteed to be a bare array/object vs. wrapped
+# in an envelope key, so unwrap defensively rather than assume one shape.
 unwrap_list() {
   jq 'if type == "array" then . else (.data // .items // .projects // .tasklists // .tasks // []) end' "$1" 2>/dev/null
 }
 
-# Same idea as unwrap_list, but for a single JSON object instead of a list.
 unwrap_object() {
   jq 'if type == "object" then (.data // .) else null end' "$1" 2>/dev/null
 }
 
-# Runs `freelo <args...> --agent`, saving stdout to $output.
-# On success: returns 0.
-# On failure: appends a truncated error line to $warnings and returns 1.
-#   $1 = label (used in warning text / error log filename)
-#   $2 = output file path
-#   $3.. = the freelo subcommand + args (e.g. `projects list`)
+# Runs `freelo <args...> --agent` via run_capped into $output.
+# On failure (including a response that hit the byte cap), logs a one-line
+# reason to $warnings and returns 1.
 fetch() {
   local label=$1 output=$2
   shift 2
-  if freelo "$@" --agent >"$output" 2>"$tmp/$label.err"; then
+  local err="$tmp/$label.err"
+  run_capped "$output" "$err" freelo "$@" --agent
+  local rc=$?
+  if [[ $rc -eq 0 && $(wc -c <"$output") -lt $MAX_RESPONSE_BYTES ]]; then
     return 0
   fi
-  # Flatten the error output to one line, capped at 200 chars, and log it.
-  printf '%s: %s\n' "$label" "$(tr '\n' ' ' <"$tmp/$label.err" | cut -c1-200)" >>"$warnings"
+  local reason
+  if [[ $(wc -c <"$output") -ge $MAX_RESPONSE_BYTES ]]; then
+    reason="response exceeded ${MAX_RESPONSE_BYTES}-byte limit, discarded"
+    : >"$output"
+  else
+    reason=$(tr '\n' ' ' <"$err" | cut -c1-200)
+    [[ -n $reason ]] || reason="timed out or failed (exit $rc)"
+  fi
+  printf '%s: %s\n' "$label" "$reason" >>"$warnings"
   return 1
 }
 
-# ---- Fetch data ----
-# Independent calls run in parallel — each `freelo` invocation pays its own
-# auth + HTTP round-trip, and running them one after another made total
-# refresh time scale with the number of calls instead of the slowest one.
+# ---- Fetch data (independent calls run in parallel) ----
 
-# Projects and tracking never depend on each other or on --project, and
-# tasklists only needs project_id, so all three fire at once.
 (
   fetch projects "$tmp/projects.raw" projects list \
     && unwrap_list "$tmp/projects.raw" >"$tmp/projects.json" \
@@ -137,26 +167,18 @@ fetch() {
     || printf 'null\n' >"$tmp/tracking.json"
 ) &
 
-# Default tasklists/tasks to empty — only populated if --project was given.
 printf '[]\n' >"$tmp/tasklists.json"
 printf '[]\n' >"$tmp/tasks.json"
 if [[ -n $project_id ]]; then
-  # Tasklists — only needed for the quick-add tasklist dropdown now (tasks
-  # below no longer depend on it).
   (
     fetch tasklists "$tmp/tasklists.raw" tasklists list --project "$project_id" \
       && unwrap_list "$tmp/tasklists.raw" >"$tmp/tasklists.json" \
       || printf '[]\n' >"$tmp/tasklists.json"
   ) &
 
-  # Tasks — one call across the whole project via the /all-tasks endpoint
-  # (state_id=1 = active, matching the previous per-tasklist calls' default
-  # active-only behavior), instead of one `tasks list` call per tasklist.
   # No CLI subcommand exposes this endpoint's richer per-task fields
-  # (priority_enum, due_date, tasklist{id,name}) — tasklist-scoped
-  # `tasks list` only ever returned {id, name, worker} — so this goes
-  # through the raw `api get` passthrough. project_id is validated
-  # ^[0-9]+$ above, safe to interpolate into the query string.
+  # (priority_enum, due_date, tasklist{id,name}), so use the raw `api get`
+  # passthrough instead. project_id is validated ^[0-9]+$ above.
   (
     fetch tasks "$tmp/tasks.raw" api get "/all-tasks?projects_ids[]=$project_id&state_id=1" \
       && jq '(.data.tasks // []) | map({
@@ -171,12 +193,8 @@ wait
 
 # ---- Assemble final JSON ----
 
-# De-duplicate warning lines and turn them into a JSON array of strings
-# (dropping any blank line).
 warnings_json=$(sort -u "$warnings" | jq -Rsc 'split("\n") | map(select(length > 0))')
 
-# Overall state is "ready" unless we have warnings AND zero projects came
-# back — that combination means the refresh effectively failed.
 state=ready
 message=""
 if [[ $(jq 'length' <<<"$warnings_json") -gt 0 && $(jq 'length' "$tmp/projects.json") -eq 0 ]]; then
@@ -184,7 +202,6 @@ if [[ $(jq 'length' <<<"$warnings_json") -gt 0 && $(jq 'length' "$tmp/projects.j
   message="Freelo data could not be loaded."
 fi
 
-# Stitch everything together into the final schema and print it to stdout.
 jq -n --arg state "$state" --arg message "$message" \
   --slurpfile projects "$tmp/projects.json" \
   --slurpfile tasklists "$tmp/tasklists.json" \
