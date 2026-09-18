@@ -28,6 +28,9 @@ Panel {
 
     property string taskFilter: ""
     property string selectedTaskTasklistId: ""
+    property int spinnerFrame: 0
+    property bool tabSwitchFlash: false
+    readonly property var spinnerFrames: ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
     property string quickAddText: ""
     property string renamingTaskId: ""
     property string renameText: ""
@@ -110,6 +113,44 @@ Panel {
         return rows;
     }
 
+    function isOverdue(task) {
+        const raw = String((task && task.dueDate) || "");
+        if (raw === "")
+            return false;
+        const d = new Date(raw.split(" ")[0]);
+        if (isNaN(d.getTime()))
+            return false;
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        d.setHours(0, 0, 0, 0);
+        return d.getTime() < today.getTime();
+    }
+
+    function workerLabel(task) {
+        const w = task && task.worker;
+        if (!w || typeof w !== "object")
+            return "";
+        const name = String(w.name || w.fullname || w.full_name || "").trim();
+        return name === "" ? "" : name.split(" ")[0];
+    }
+
+    // One line combining due date, assignee, and (only when the "All" tab
+    // is active, since a specific tab already implies the tasklist) which
+    // tasklist the task is on — the per-row detail the old stacked-Text
+    // layout couldn't fit without three separate lines per row.
+    function metaLabel(task) {
+        const parts = [];
+        const due = dueDateLabel(task);
+        if (due !== "")
+            parts.push(due);
+        const worker = workerLabel(task);
+        if (worker !== "")
+            parts.push(worker);
+        if (root.selectedTaskTasklistId === "" && task && task.tasklistName)
+            parts.push(task.tasklistName);
+        return parts.join("  ·  ");
+    }
+
     function priorityLabel(priority) {
         const p = String(priority || "").toLowerCase();
         if (p === "h" || p === "high")
@@ -165,6 +206,16 @@ Panel {
         persistSettings({
             selectedTasklistId: id
         });
+    }
+
+    // Tasklist tabs filter the already-fetched task list locally (no
+    // network round-trip), so there's no loading state to animate off of --
+    // this flash gives the switch the same brief "content changed" beat the
+    // loading spinner gives a real refresh.
+    function selectTaskTab(id) {
+        root.selectedTaskTasklistId = id;
+        root.tabSwitchFlash = true;
+        tabFlashTimer.restart();
     }
 
     function submitQuickAdd() {
@@ -235,6 +286,19 @@ Panel {
         Quickshell.execDetached(["omarchy-launch-browser", "https://app.freelo.io/task/" + String(task.id)]);
     }
 
+    Timer {
+        interval: 80
+        repeat: true
+        running: !!(root.service && root.service.loading)
+        onTriggered: root.spinnerFrame = (root.spinnerFrame + 1) % root.spinnerFrames.length
+    }
+
+    Timer {
+        id: tabFlashTimer
+        interval: 120
+        onTriggered: root.tabSwitchFlash = false
+    }
+
     KeyboardPanel {
         id: panel
         anchorItem: root.anchorItem
@@ -242,7 +306,7 @@ Panel {
         bar: root.bar
         open: root.opened
         focusTarget: keyCatcher
-        contentWidth: panel.fittedContentWidth(Style.space(360))
+        contentWidth: panel.fittedContentWidth(Style.space(420))
         contentHeight: panel.fittedContentHeight(content.implicitHeight, Style.space(560))
 
         PanelKeyCatcher {
@@ -283,6 +347,18 @@ Panel {
                 interactive: contentHeight > height
                 ScrollBar.vertical: ScrollBar {
                     policy: ScrollBar.AsNeeded
+                }
+
+                // Flickable's own wheel-to-flick conversion is heavily damped and
+                // reads as sluggish for a tall task list. Same fix as tabsFlick's
+                // WheelHandler below: move contentY directly off the wheel delta.
+                WheelHandler {
+                    target: null
+                    acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+                    onWheel: function (event) {
+                        const delta = event.angleDelta.y !== 0 ? event.angleDelta.y : event.angleDelta.x;
+                        panelFlick.contentY = Math.max(0, Math.min(Math.max(0, panelFlick.contentHeight - panelFlick.height), panelFlick.contentY - delta));
+                    }
                 }
 
                 Column {
@@ -411,11 +487,25 @@ Panel {
                         foreground: root.foreground
                     }
 
-                    PanelSectionHeader {
+                    RowLayout {
                         width: parent.width
-                        text: "OPEN TASKS  " + root.openTasks.length
-                        foreground: root.foreground
-                        fontFamily: root.fontFamily
+                        spacing: Style.space(6)
+
+                        PanelSectionHeader {
+                            Layout.fillWidth: true
+                            text: "OPEN TASKS  " + root.openTasks.length
+                            foreground: root.foreground
+                            fontFamily: root.fontFamily
+                        }
+
+                        Text {
+                            visible: !!(root.service && root.service.loading)
+                            textFormat: Text.PlainText
+                            text: root.spinnerFrames[root.spinnerFrame]
+                            color: root.dim
+                            font.family: root.fontFamily
+                            font.pixelSize: Style.font.body
+                        }
                     }
 
                     Flickable {
@@ -449,7 +539,7 @@ Panel {
                             foreground: root.foreground
                             fontFamily: root.fontFamily
                             onChanged: function (value) {
-                                root.selectedTaskTasklistId = value;
+                                root.selectTaskTab(value);
                             }
                         }
                     }
@@ -468,19 +558,34 @@ Panel {
                         }
                     }
 
-                    Text {
-                        visible: root.openTasks.length === 0
-                        width: parent.width
-                        text: (root.service && root.service.selectedProjectId === "") ? "Pick a project above." : "No open tasks."
-                        color: root.dim
-                        font.family: root.fontFamily
-                        font.pixelSize: Style.font.body
-                        horizontalAlignment: Text.AlignHCenter
-                    }
-
                     Column {
+                        id: resultsArea
                         width: parent.width
                         spacing: Style.space(4)
+                        // Dips while a fetch is in flight or a tab/project switch just
+                        // landed, so stale rows never sit there looking current.
+                        opacity: (!!(root.service && root.service.loading) || root.tabSwitchFlash) ? 0.35 : 1.0
+
+                        Behavior on opacity {
+                            NumberAnimation {
+                                duration: 140
+                                easing.type: Easing.OutQuad
+                            }
+                        }
+
+                        Text {
+                            visible: root.openTasks.length === 0
+                            width: parent.width
+                            text: {
+                                if (root.service && root.service.loading && root.openTasks.length === 0)
+                                    return "Loading tasks…";
+                                return (root.service && root.service.selectedProjectId === "") ? "Pick a project above." : "No open tasks.";
+                            }
+                            color: root.dim
+                            font.family: root.fontFamily
+                            font.pixelSize: Style.font.body
+                            horizontalAlignment: Text.AlignHCenter
+                        }
 
                         Repeater {
                             model: root.openTasks
@@ -488,14 +593,19 @@ Panel {
                             CursorSurface {
                                 id: taskRow
                                 required property var modelData
+                                property bool hovered: false
+                                readonly property bool isTracking: !!(root.service && root.service.tracking && root.service.tracking.active && root.service.tracking.taskId === modelData.id)
+                                readonly property bool actionsVisible: hovered || root.renamingTaskId === String(modelData.id)
                                 width: parent.width
                                 foreground: root.foreground
+                                current: isTracking
                                 implicitHeight: rowLayout.implicitHeight + Style.space(14)
 
                                 MouseArea {
                                     anchors.fill: parent
                                     hoverEnabled: true
                                     cursorShape: Qt.PointingHandCursor
+                                    onContainsMouseChanged: taskRow.hovered = containsMouse
                                     onClicked: root.openTask(taskRow.modelData)
                                 }
 
@@ -522,77 +632,114 @@ Panel {
                                     ColumnLayout {
                                         visible: root.renamingTaskId !== String(taskRow.modelData.id)
                                         Layout.fillWidth: true
-                                        spacing: 0
+                                        spacing: Style.space(2)
+
+                                        RowLayout {
+                                            Layout.fillWidth: true
+                                            spacing: Style.space(6)
+
+                                            BorderSurface {
+                                                readonly property string label: root.priorityLabel(taskRow.modelData.priority)
+                                                readonly property color tint: root.priorityColor(taskRow.modelData.priority)
+                                                visible: label !== ""
+                                                Layout.alignment: Qt.AlignVCenter
+                                                implicitWidth: priorityText.implicitWidth + Style.space(8)
+                                                implicitHeight: priorityText.implicitHeight + Style.space(3)
+                                                radius: Style.cornerRadius
+                                                color: Qt.rgba(tint.r, tint.g, tint.b, 0.16)
+                                                borderSpec: Border.flat(Qt.rgba(tint.r, tint.g, tint.b, 0.4), 1)
+
+                                                Text {
+                                                    id: priorityText
+                                                    anchors.centerIn: parent
+                                                    text: parent.label
+                                                    textFormat: Text.PlainText
+                                                    color: parent.tint
+                                                    font.family: root.fontFamily
+                                                    font.pixelSize: Style.font.caption
+                                                    font.bold: true
+                                                }
+                                            }
+
+                                            Text {
+                                                Layout.fillWidth: true
+                                                text: taskRow.modelData.name
+                                                textFormat: Text.PlainText
+                                                color: root.foreground
+                                                font.family: root.fontFamily
+                                                font.pixelSize: Style.font.body
+                                                font.bold: taskRow.isTracking
+                                                elide: Text.ElideRight
+                                            }
+                                        }
 
                                         Text {
-                                            visible: text !== "" || root.priorityLabel(taskRow.modelData.priority) !== ""
-                                            text: root.priorityLabel(taskRow.modelData.priority)
-                                            color: root.priorityColor(taskRow.modelData.priority)
+                                            readonly property string label: root.metaLabel(taskRow.modelData)
+                                            visible: label !== ""
                                             Layout.fillWidth: true
+                                            text: label
                                             textFormat: Text.PlainText
+                                            color: root.isOverdue(taskRow.modelData) ? root.urgent : root.dim
                                             font.family: root.fontFamily
                                             font.pixelSize: Style.font.caption
                                             elide: Text.ElideRight
                                         }
+                                    }
 
-                                        Text {
-                                            Layout.fillWidth: true
-                                            text: taskRow.modelData.name
-                                            textFormat: Text.PlainText
-                                            color: root.foreground
-                                            font.family: root.fontFamily
-                                            font.pixelSize: Style.font.body
-                                            elide: Text.ElideRight
+                                    RowLayout {
+                                        // Stays in layout (reserves its width) even when hidden, so
+                                        // showing/hiding actions on hover never reflows the row --
+                                        // only opacity/enabled change, not visible.
+                                        opacity: taskRow.actionsVisible ? 1 : 0
+                                        enabled: taskRow.actionsVisible
+                                        spacing: Style.space(4)
+
+                                        Behavior on opacity {
+                                            NumberAnimation {
+                                                duration: 80
+                                            }
                                         }
 
-                                        Text {
-                                            readonly property string dueLabel: root.dueDateLabel(taskRow.modelData)
-                                            visible: dueLabel !== "" && root.renamingTaskId !== String(taskRow.modelData.id)
-                                            text: dueLabel
-                                            color: root.dim
-                                            font.family: root.fontFamily
-                                            font.pixelSize: Style.font.caption
+                                        PanelActionButton {
+                                            visible: !taskRow.isTracking
+                                            iconText: "▶"
+                                            tooltipText: "Start tracking"
+                                            foreground: root.foreground
+                                            fontFamily: root.fontFamily
+                                            onClicked: if (root.service)
+                                                root.service.startTracking(taskRow.modelData.id)
                                         }
-                                    }
 
-                                    PanelActionButton {
-                                        iconText: "▶"
-                                        tooltipText: "Start tracking"
-                                        foreground: root.foreground
-                                        fontFamily: root.fontFamily
-                                        onClicked: if (root.service)
-                                            root.service.startTracking(taskRow.modelData.id)
-                                    }
-
-                                    PanelActionButton {
-                                        iconText: "✓"
-                                        tooltipText: "Finish"
-                                        foreground: root.foreground
-                                        fontFamily: root.fontFamily
-                                        onClicked: if (root.service)
-                                            root.service.finishTask(taskRow.modelData.id)
-                                    }
-
-                                    PanelActionButton {
-                                        iconText: "✎"
-                                        tooltipText: "Rename"
-                                        foreground: root.foreground
-                                        fontFamily: root.fontFamily
-                                        onClicked: {
-                                            if (root.renamingTaskId === String(taskRow.modelData.id))
-                                                root.cancelRename();
-                                            else
-                                                root.beginRename(taskRow.modelData);
+                                        PanelActionButton {
+                                            iconText: "✓"
+                                            tooltipText: "Finish"
+                                            foreground: root.foreground
+                                            fontFamily: root.fontFamily
+                                            onClicked: if (root.service)
+                                                root.service.finishTask(taskRow.modelData.id)
                                         }
-                                    }
 
-                                    PanelActionButton {
-                                        iconText: "✕"
-                                        tooltipText: "Delete"
-                                        foreground: root.foreground
-                                        hoverColor: root.urgent
-                                        fontFamily: root.fontFamily
-                                        onClicked: root.requestDelete(taskRow.modelData)
+                                        PanelActionButton {
+                                            iconText: "✎"
+                                            tooltipText: "Rename"
+                                            foreground: root.foreground
+                                            fontFamily: root.fontFamily
+                                            onClicked: {
+                                                if (root.renamingTaskId === String(taskRow.modelData.id))
+                                                    root.cancelRename();
+                                                else
+                                                    root.beginRename(taskRow.modelData);
+                                            }
+                                        }
+
+                                        PanelActionButton {
+                                            iconText: "✕"
+                                            tooltipText: "Delete"
+                                            foreground: root.foreground
+                                            hoverColor: root.urgent
+                                            fontFamily: root.fontFamily
+                                            onClicked: root.requestDelete(taskRow.modelData)
+                                        }
                                     }
                                 }
                             }

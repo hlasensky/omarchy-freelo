@@ -85,6 +85,7 @@ Item {
         const task = server && server.task && typeof server.task === "object" ? server.task : null;
         return {
             active: !!raw.active,
+            taskId: String((task && task.id) ?? ""),
             taskName: String((task && task.name) || ""),
             startedAt: String((server && server.date_reported) || "")
         };
@@ -94,6 +95,7 @@ Item {
         const task = root.tasks.find(t => t.id === String(taskId));
         return {
             active: true,
+            taskId: String(taskId),
             taskName: task ? task.name : "",
             startedAt: new Date().toISOString()
         };
@@ -197,6 +199,7 @@ Item {
         runAction(["tracking", "stop"], function () {
             tracking = {
                 active: false,
+                taskId: "",
                 taskName: "",
                 startedAt: ""
             };
