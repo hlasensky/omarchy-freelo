@@ -594,8 +594,9 @@ Panel {
                                 id: taskRow
                                 required property var modelData
                                 property bool hovered: false
+                                property bool actionsHovered: false
                                 readonly property bool isTracking: !!(root.service && root.service.tracking && root.service.tracking.active && root.service.tracking.taskId === modelData.id)
-                                readonly property bool actionsVisible: hovered || root.renamingTaskId === String(modelData.id)
+                                readonly property bool actionsVisible: hovered || actionsHovered || root.renamingTaskId === String(modelData.id)
                                 width: parent.width
                                 foreground: root.foreground
                                 current: isTracking
@@ -702,28 +703,43 @@ Panel {
 
                                         PanelActionButton {
                                             visible: !taskRow.isTracking
+                                            Layout.preferredWidth: Style.space(22)
+                                            Layout.preferredHeight: Style.space(22)
                                             iconText: "▶"
                                             tooltipText: "Start tracking"
                                             foreground: root.foreground
                                             fontFamily: root.fontFamily
+                                            onHovered: function (isHovered) {
+                                                taskRow.actionsHovered = isHovered;
+                                            }
                                             onClicked: if (root.service)
                                                 root.service.startTracking(taskRow.modelData.id)
                                         }
 
                                         PanelActionButton {
+                                            Layout.preferredWidth: Style.space(22)
+                                            Layout.preferredHeight: Style.space(22)
                                             iconText: "✓"
                                             tooltipText: "Finish"
                                             foreground: root.foreground
                                             fontFamily: root.fontFamily
+                                            onHovered: function (isHovered) {
+                                                taskRow.actionsHovered = isHovered;
+                                            }
                                             onClicked: if (root.service)
                                                 root.service.finishTask(taskRow.modelData.id)
                                         }
 
                                         PanelActionButton {
+                                            Layout.preferredWidth: Style.space(22)
+                                            Layout.preferredHeight: Style.space(22)
                                             iconText: "✎"
                                             tooltipText: "Rename"
                                             foreground: root.foreground
                                             fontFamily: root.fontFamily
+                                            onHovered: function (isHovered) {
+                                                taskRow.actionsHovered = isHovered;
+                                            }
                                             onClicked: {
                                                 if (root.renamingTaskId === String(taskRow.modelData.id))
                                                     root.cancelRename();
@@ -733,11 +749,16 @@ Panel {
                                         }
 
                                         PanelActionButton {
+                                            Layout.preferredWidth: Style.space(22)
+                                            Layout.preferredHeight: Style.space(22)
                                             iconText: "✕"
                                             tooltipText: "Delete"
                                             foreground: root.foreground
                                             hoverColor: root.urgent
                                             fontFamily: root.fontFamily
+                                            onHovered: function (isHovered) {
+                                                taskRow.actionsHovered = isHovered;
+                                            }
                                             onClicked: root.requestDelete(taskRow.modelData)
                                         }
                                     }
